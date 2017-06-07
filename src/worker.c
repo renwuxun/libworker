@@ -2,206 +2,184 @@
 // Created by renwuxun on 5/29/17.
 //
 
+//#include "worker.h"
+
+#include <ev.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
 #include "worker.h"
+#include "buf.h"
 
 
 
 static struct worker_s worker = {0};
 
-size_t worker_conn_pool_need_size(size_t count) {
-    return sizeof(struct worker_conn_pool_s) + sizeof(struct worker_conn_s) * count;
-}
-struct worker_conn_pool_s* worker_conn_pool_init(char* const ptr, size_t ptrsize) {
-    if (ptrsize < sizeof(struct worker_conn_pool_s)+sizeof(struct worker_conn_s)) {
-        worker_log_crit("connection pool need at least %d, %d given", (int)(sizeof(struct worker_conn_pool_s)+sizeof(struct worker_conn_s)), (int)ptrsize);
-        return NULL;
-    }
 
-    char* _ptr = ptr;
-
-    struct worker_conn_pool_s* conn_pool = (struct worker_conn_pool_s*)_ptr;
-    _ptr += sizeof(struct worker_conn_pool_s);
-    ptrsize -= sizeof(struct worker_conn_pool_s);
-
-    conn_pool->conn = (struct worker_conn_s*)_ptr;
-    conn_pool->frees = conn_pool->total = ptrsize/sizeof(struct worker_conn_s);
-    int i;
-    for (i = 0; i < conn_pool->total-1; i++) {
-        conn_pool->conn[i].next = &conn_pool->conn[i+1];
-    }
-    conn_pool->conn[conn_pool->total-1].next = NULL;
-
-    return conn_pool;
-}
-inline static struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool_s* conn_pool) {
-    struct worker_conn_s* conn = conn_pool->conn;
-    if (conn) {
-        conn_pool->conn = conn->next;
-        conn->next = NULL;
-        conn_pool->frees--;
-    }
-    return conn;
-}
-inline static void worker_conn_pool_put(struct worker_conn_pool_s* conn_pool, struct worker_conn_s* conn) {
-    if (NULL == conn_pool->conn) {
-        conn_pool->conn = conn;
-        return;
-    }
-    conn->next = conn_pool->conn;
-    conn_pool->conn = conn;
-    conn_pool->frees++;
-}
-
-
-inline static void worker_real_send(struct worker_conn_s* worker_conn) {
+inline static ssize_t worker_recv(int fd, char* buf, size_t bufsize) {
     ssize_t n;
     do {
-        n = send(worker_conn->fd, worker_conn->sendbuf->base, worker_conn->sendbuf->size, 0);
-        worker_log_debug("send:%d, %s, %d",n,strerror(errno), worker_conn->sendbuf->size);
-        switch (n) {
-            case -1:
-                if (errno == EINTR) {
-                    continue;
-                }
-                if (errno == EAGAIN) { // 缓冲区满了,等下次
-                    errno = 0;
-                    return;
-                }
-                worker.on_send_error(worker_conn);
-                worker_log_error("send");
-                return;
-            default:
-                worker_conn->sendbuf->base += n;
-                worker_conn->sendbuf->size -= n;
-                worker.on_send_success(worker_conn);
-                if (!worker_conn->sendbuf) {
-                    return;
-                }
-        }
-    } while (1);
+        n = recv(fd, buf, bufsize, 0);
+    } while (EINTR == errno);
+    return n;
 }
-inline static void worker_real_recv(struct worker_conn_s* worker_conn) {
+inline static ssize_t worker_send(int fd, char* buf, size_t bufsize) {
     ssize_t n;
     do {
-        worker.recv_buf_setter(worker_conn);
-        n = recv(worker_conn->fd, worker_conn->recvbuf->base, worker_conn->recvbuf->size, 0);
-        worker_log_debug("recv:%d, %s, %d",n,strerror(errno), worker_conn->recvbuf->size);
+        n = send(fd, buf, bufsize, 0);
+    } while (EINTR == errno);
+    return n;
+}
+
+inline static void worker_conn_recv_stop(struct worker_conn_s* worker_conn) {
+    if (ev_is_active(&worker_conn->r_watcher)) {
+        ev_io_stop(worker.loop, &worker_conn->r_watcher);
+    }
+}
+inline static void worker_conn_send_stop(struct worker_conn_s* worker_conn) {
+    if (ev_is_active(&worker_conn->w_watcher)) {
+        ev_io_stop(worker.loop, &worker_conn->w_watcher);
+    }
+}
+void worker_conn_close(struct worker_conn_s* worker_conn) {
+    if (worker_conn->fd > 0) {
+        worker_conn_recv_stop(worker_conn);
+        worker_conn_send_stop(worker_conn);
+        close(worker_conn->fd);
+        worker_conn->fd = -1;
+        worker.on_conn_free(worker_conn);
+    }
+}
+
+inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
+    struct worker_buf_s* buf;
+    ssize_t n;
+    if (!worker_conn->recvbuf) {
+        worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+    }
+    for (;worker_conn->recvbuf;) {
+        n = worker_recv(worker_conn->fd, worker_conn->recvbuf->data+worker_conn->recvbuf->idx, worker_conn->recvbuf->size);
         switch (n) {
             case 0:
-                worker.on_recv_close(worker_conn);
+                worker.on_conn_recv_close(worker_conn);
+                worker_conn_close(worker_conn); // 避免关闭fd两次
                 return;
             case -1:
-                if (errno == EINTR) {
-                    continue;
+                if (EAGAIN != errno) {
+                    worker.on_conn_recv_error(worker_conn);
+                    worker_conn_close(worker_conn); // 避免关闭fd两次
                 }
-                if (errno == EAGAIN) {
-                    errno = 0;
-                    return;
-                }
-                worker.on_recv_error(worker_conn);
-                worker_log_error("recv");
                 return;
             default:
-                worker_conn->recvbuf->base += n;
                 worker_conn->recvbuf->size -= n;
-                worker.on_recv_success(worker_conn);
-                if (!worker_conn->recvbuf) {
+                worker_conn->recvbuf->idx += n;
+                worker.on_conn_recv_success(worker_conn, worker_conn->recvbufchain);
+                if (0 < worker_conn->recvbuf->size) { // 接收区空了
                     return;
                 }
+                /* curren recv buf is full*/
+                buf = worker_conn->recvbufchain;
+                for (;buf->next;buf=buf->next) {}
+                buf->next = worker_conn->recvbuf;
+                worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
         }
-    } while (1);
-}
-
-
-inline static void worker_conn_register_recv(struct worker_conn_s* worker_conn) {
-    if (ev_is_active(&worker_conn->rw_watcher)) {
-        ev_timer_stop(worker.loop, &worker_conn->close_timer);
-        ev_io_stop(worker.loop, &worker_conn->rw_watcher);
-    }
-    ev_io_set(&worker_conn->rw_watcher, worker_conn->fd, EV_READ);
-    ev_io_start(worker.loop, &worker_conn->rw_watcher);
-    ev_timer_set(&worker_conn->close_timer, WORKER_CLOSE_TIMEOUT_SEC, 0.);
-    ev_timer_start(worker.loop, &worker_conn->close_timer);
-}
-inline static void worker_conn_register_send(struct worker_conn_s* worker_conn) {
-    if (ev_is_active(&worker_conn->rw_watcher)) {
-        ev_timer_stop(worker.loop, &worker_conn->close_timer);
-        ev_io_stop(worker.loop, &worker_conn->rw_watcher);
-    }
-    ev_io_set(&worker_conn->rw_watcher, worker_conn->fd, EV_WRITE);
-    ev_io_start(worker.loop, &worker_conn->rw_watcher);
-    ev_timer_set(&worker_conn->close_timer, WORKER_CLOSE_TIMEOUT_SEC, 0);
-    ev_timer_start(worker.loop, &worker_conn->close_timer);
-}
-
-void worker_conn_recv_start(struct worker_conn_s* worker_conn) {
-    worker_real_recv(worker_conn);
-    if (worker_conn->recvbuf) {
-        worker_conn_register_recv(worker_conn);
-    }
-}
-void worker_conn_send_start(struct worker_conn_s* worker_conn) {
-    worker_real_send(worker_conn);
-    if (worker_conn->sendbuf) {
-        worker_conn_register_send(worker_conn);
     }
 }
 
-inline static void worker_recv_send(struct ev_loop* loop, struct ev_io* rw_watcher, int revents) {
-    struct worker_conn_s* worker_conn = container_of(rw_watcher, struct worker_conn_s, rw_watcher);
-    if (revents & EV_READ) {
-        worker_real_recv(worker_conn);
-    } else if (revents & EV_WRITE) {
-        worker_real_send(worker_conn);
-    } else {
-        worker_log_crit("worker_recv_send: unkown event");
+inline static void worker_conn_send(struct worker_conn_s* worker_conn) {
+    struct worker_buf_s* a_send_buf;
+    ssize_t n;
+    for (;worker_conn->sendbuf;) {
+        n = worker_send(worker_conn->fd, worker_conn->sendbuf->data+worker_conn->sendbuf->idx, worker_conn->sendbuf->size);
+        switch (n) {
+            case -1:
+                if (EAGAIN != errno) {
+                    worker.on_conn_send_error(worker_conn);
+                    worker_conn_close(worker_conn); // 避免关闭fd两次
+                }
+                return;
+            default:
+                worker_conn->sendbuf->size -= n;
+                worker_conn->sendbuf->idx += n;
+                if (0 < worker_conn->sendbuf->size) { // 发送区满了
+                    return;
+                }
+                a_send_buf = worker_conn->sendbuf;
+                worker_conn->sendbuf = worker_conn->sendbuf->next;
+                a_send_buf->next = NULL;
+                worker.on_conn_send_a_buf_finish(worker_conn, a_send_buf);
+        }
     }
 }
 
-void worker_conn_close(struct worker_conn_s* worker_conn) {
-    if (ev_is_active(&worker_conn->close_timer)) {
-        ev_timer_stop(worker.loop, &worker_conn->close_timer);
-    }
-    if (ev_is_active(&worker_conn->rw_watcher)) {
-        ev_io_stop(worker.loop, &worker_conn->rw_watcher);
-        worker_conn_pool_put(worker.conn_pool, worker_conn);
-    }
-}
-
-inline static void worker_recv_send_timeout(struct ev_loop* loop, struct ev_timer* close_timer, int revents) {
-    struct worker_conn_s* worker_conn = container_of(close_timer, struct worker_conn_s, close_timer);
-    worker.on_recv_send_timeout(worker_conn);
-}
-
-
-inline static void worker_accept(struct ev_loop* loop, struct ev_io* accept_watcher, int revents) {
-    int client_fd;
-    __SOCKADDR_ARG client_addr={0};
-    socklen_t* __restrict client_addr_len={0};
-
-    struct worker_conn_s* worker_conn = worker_conn_pool_get(worker.conn_pool);
-    if (NULL == worker_conn) {
-        worker_log_warning("no more connection, total:%d", (int)worker.conn_pool->total);
+void worker_conn_send_buf_append(struct worker_conn_s* worker_conn, struct worker_buf_s* sendbuf) {
+    if (!worker_conn->sendbuf) {
+        worker_conn->sendbuf = sendbuf;
         return;
     }
+    struct worker_buf_s* buf = worker_conn->sendbuf;
+    for (;buf->next;buf=buf->next) {}
+    buf->next = sendbuf;
+}
+
+
+inline static void worker_accept_stop_cb(struct ev_loop* loop, struct ev_signal* winch_watcher, int revents) {
+    if (ev_is_active(&worker.accept_watcher)) {
+        ev_io_stop(loop, &worker.accept_watcher);
+    }
+}
+inline static void worker_loop_break_cb(struct ev_loop* loop, struct ev_signal* quit_watcher, int revents) {
+    if (ev_is_active(&worker.signal_sigquit_watcher)) {
+        ev_io_stop(loop, &worker.accept_watcher);
+        ev_break(loop, EVBREAK_ONE);
+    }
+}
+
+inline static void worker_conn_recv_cb(struct ev_loop* loop, struct ev_io* r_watcher, int revents) {
+    struct worker_conn_s* worker_conn = container_of(r_watcher, struct worker_conn_s, r_watcher);
+    worker_conn_recv(worker_conn);
+}
+inline static void worker_conn_send_cb(struct ev_loop* loop, struct ev_io* w_watcher, int revents) {
+    struct worker_conn_s* worker_conn = container_of(w_watcher, struct worker_conn_s, w_watcher);
+    worker_conn_send(worker_conn);
+}
+
+inline static void worker_conn_recv_start(struct worker_conn_s* worker_conn) {
+    if (!ev_is_active(&worker_conn->r_watcher)) {
+        ev_io_init(&worker_conn->r_watcher, worker_conn_recv_cb, worker_conn->fd, EV_READ);
+        ev_io_start(worker.loop, &worker_conn->r_watcher);
+    }
+}
+
+void worker_conn_send_start(struct worker_conn_s* worker_conn) {
+    if (!ev_is_active(&worker_conn->w_watcher)) {
+        ev_io_init(&worker_conn->w_watcher, worker_conn_send_cb, worker_conn->fd, EV_WRITE);
+        ev_io_start(worker.loop, &worker_conn->w_watcher);
+    }
+}
+
+int worker_accept(struct worker_conn_s* worker_conn) {
+    int client_fd;
 
     do {
-        client_fd = accept(worker.listen_fd, client_addr, client_addr_len);
+        client_fd = accept(worker.listen_fd, &worker_conn->addr, &worker_conn->addr_len);
         if (-1 == client_fd) {
             switch (errno) {
                 case EINTR:
                     continue;
                 case EAGAIN:
-                    goto end;
+                    return client_fd;
                 case EMFILE:
                     worker_log_warning("process open files limit");
-                    goto end;
+                    return client_fd;
                 case ENFILE:
                     worker_log_warning("system open files limit");
-                    goto end;
+                    return client_fd;
                 default://error
-                    worker_log_error("worker_accept");
-                    goto end;
+                    worker_log_warning("worker_accept");
+                    return client_fd;
             }
         }
         break;
@@ -209,66 +187,62 @@ inline static void worker_accept(struct ev_loop* loop, struct ev_io* accept_watc
 
     int p = fcntl(client_fd, F_GETFL);
     if (-1 == p || -1 == fcntl(client_fd, F_SETFL, p|O_NONBLOCK)) {
-        goto end;
+        worker_log_warning("error on set nonblocking");
+        return client_fd;
     }
 
-    worker_conn->fd = client_fd;
-    ev_init(&worker_conn->rw_watcher, worker_recv_send);
-    ev_init(&worker_conn->close_timer, worker_recv_send_timeout);
+    return client_fd;
+}
+
+inline static void worker_accept_cb(struct ev_loop* loop, struct ev_io* accept_watcher, int revents) {
+    struct worker_conn_s* worker_conn = worker.on_conn_alloc();
+    if (!worker_conn) {
+        worker_log_warning("alloc a null connection");
+        return;
+    }
+    if (-1 == worker_accept(worker_conn)) {
+        worker.on_conn_free(worker_conn);
+        return;
+    }
+
     worker_conn_recv_start(worker_conn);
-
-end:
-    worker_conn_pool_put(worker.conn_pool, worker_conn);
-}
-
-inline static void worker_accept_stop(struct ev_loop* loop, struct ev_signal* quit_watcher, int revents) {
-    if (ev_is_active(&worker.accept_watcher)) {
-        ev_io_stop(loop, &worker.accept_watcher);
-    }
-}
-
-inline static void worker_loop_break(struct ev_loop* loop, struct ev_signal* quit_watcher, int revents) {
-    if (ev_is_active(&worker.signal_sigquit_watcher)) {
-        ev_io_stop(loop, &worker.accept_watcher);
-        ev_break(loop, EVBREAK_ONE);
-    }
 }
 
 
 void worker_init(
         int listen_fd,
-        struct worker_conn_pool_s* conn_pool,
-        struct worker_buf_pool_s* buf_pool,
-        void (*recv_buf_setter)(struct worker_conn_s* worker_conn),
-        void (*on_recv_send_timeout)(struct worker_conn_s* worker_conn),
-        void (*on_recv_error)(struct worker_conn_s* worker_conn),
-        void (*on_recv_close)(struct worker_conn_s* worker_conn),
-        void (*on_recv_success)(struct worker_conn_s* worker_conn),
-        void (*on_send_error)(struct worker_conn_s* worker_conn),
-        void (*on_send_success)(struct worker_conn_s* worker_conn)
+        struct worker_buf_s* (*on_conn_recv_buf_alloc)(struct worker_conn_s* worker_conn),
+        void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbufchain),
+        void (*on_conn_recv_error)(struct worker_conn_s* worker_conn),
+        void (*on_conn_send_error)(struct worker_conn_s* worker_conn),
+        void (*on_conn_recv_close)(struct worker_conn_s* worker_conn),
+        void (*on_conn_send_a_buf_finish)(struct worker_conn_s* worker_conn, struct worker_buf_s* a_send_buf),
+        struct worker_conn_s* (*on_conn_alloc)(),
+        void (*on_conn_free)(struct worker_conn_s* worker_conn)
 ) {
-    worker.loop = ev_loop_new(EVBACKEND_EPOLL);
     worker.listen_fd = listen_fd;
-    worker.conn_pool = conn_pool;
-    worker.buf_pool = buf_pool;
-    worker.recv_buf_setter = recv_buf_setter;
-    worker.on_recv_send_timeout = on_recv_send_timeout;
-    worker.on_recv_error = on_recv_error;
-    worker.on_recv_close = on_recv_close;
-    worker.on_recv_success = on_recv_success;
-    worker.on_send_error = on_send_error;
-    worker.on_send_success = on_send_success;
-    ev_io_init(&worker.accept_watcher, worker_accept, worker.listen_fd, EV_READ);
-};
+    worker.on_conn_recv_buf_alloc = on_conn_recv_buf_alloc;
+    worker.on_conn_recv_success = on_conn_recv_success;
+    worker.on_conn_recv_error = on_conn_recv_error;
+    worker.on_conn_send_error = on_conn_send_error;
+    worker.on_conn_recv_close = on_conn_recv_close;
+    worker.on_conn_send_a_buf_finish = on_conn_send_a_buf_finish;
+    worker.on_conn_alloc = on_conn_alloc;
+    worker.on_conn_free = on_conn_free;
+}
+
 
 int worker_run() {
-    ev_signal_init(&worker.signal_sigwinch_watcher, worker_accept_stop, SIGWINCH);
+    worker.loop = ev_loop_new(EVBACKEND_EPOLL);
+
+    ev_signal_init(&worker.signal_sigwinch_watcher, worker_accept_stop_cb, SIGWINCH);
     ev_signal_start(worker.loop, &worker.signal_sigwinch_watcher);
     ev_unref(worker.loop);
-    ev_signal_init(&worker.signal_sigquit_watcher, worker_loop_break, SIGQUIT);
+    ev_signal_init(&worker.signal_sigquit_watcher, worker_loop_break_cb, SIGQUIT);
     ev_signal_start(worker.loop, &worker.signal_sigquit_watcher);
     ev_unref(worker.loop);
 
+    ev_io_init(&worker.accept_watcher, worker_accept_cb, worker.listen_fd, EV_READ);
     ev_io_start(worker.loop, &worker.accept_watcher);
 
     int r = ev_run(worker.loop, 0);

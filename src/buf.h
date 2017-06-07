@@ -12,12 +12,13 @@
 struct worker_buf_s {
     struct worker_buf_s* next;
     size_t size;
-    char* base;
+    size_t idx;
     char data[0];
 };
 
 struct worker_buf_pool_s {
     struct worker_buf_s* buf;
+    size_t size;
     size_t total;
     size_t frees;
 };
