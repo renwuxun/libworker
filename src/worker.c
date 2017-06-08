@@ -56,11 +56,19 @@ void worker_conn_close(struct worker_conn_s* worker_conn) {
 inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
     struct worker_buf_s* buf;
     ssize_t n;
-    if (!worker_conn->recvbuf) {
-        worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+    if (!worker_conn->current_recvbuf) {
+        worker_conn->current_recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+        if (!worker_conn->recvbuf) {
+            worker_conn->recvbuf = worker_conn->current_recvbuf;
+        } else {
+            buf = worker_conn->recvbuf;
+            for(;buf->next;buf=buf->next){}
+            buf->next = worker_conn->recvbuf;
+        }
+
     }
-    for (;worker_conn->recvbuf;) {
-        n = worker_recv(worker_conn->fd, worker_conn->recvbuf->data+worker_conn->recvbuf->idx, worker_conn->recvbuf->size);
+    for (;worker_conn->current_recvbuf;) {
+        n = worker_recv(worker_conn->fd, worker_conn->current_recvbuf->data+worker_conn->current_recvbuf->idx, worker_conn->current_recvbuf->size);
         switch (n) {
             case 0:
                 worker.on_conn_recv_close(worker_conn);
@@ -73,17 +81,17 @@ inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
                 }
                 return;
             default:
-                worker_conn->recvbuf->size -= n;
-                worker_conn->recvbuf->idx += n;
-                worker.on_conn_recv_success(worker_conn, worker_conn->recvbufchain);
-                if (0 < worker_conn->recvbuf->size) { // 接收区空了
+                worker_conn->current_recvbuf->size -= n;
+                worker_conn->current_recvbuf->idx += n;
+                worker.on_conn_recv_success(worker_conn, worker_conn->recvbuf);
+                if (0 < worker_conn->current_recvbuf->size) { // 接收区空了
                     return;
                 }
                 /* curren recv buf is full*/
-                buf = worker_conn->recvbufchain;
+                worker_conn->current_recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+                buf = worker_conn->recvbuf;
                 for (;buf->next;buf=buf->next) {}
-                buf->next = worker_conn->recvbuf;
-                worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+                buf->next = worker_conn->current_recvbuf;
         }
     }
 }
@@ -212,7 +220,7 @@ inline static void worker_accept_cb(struct ev_loop* loop, struct ev_io* accept_w
 void worker_init(
         int listen_fd,
         struct worker_buf_s* (*on_conn_recv_buf_alloc)(struct worker_conn_s* worker_conn),
-        void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbufchain),
+        void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbuf),
         void (*on_conn_recv_error)(struct worker_conn_s* worker_conn),
         void (*on_conn_send_error)(struct worker_conn_s* worker_conn),
         void (*on_conn_recv_close)(struct worker_conn_s* worker_conn),

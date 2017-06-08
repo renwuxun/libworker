@@ -22,9 +22,9 @@ struct worker_conn_s {
     struct worker_conn_s* next;
     struct ev_io r_watcher;
     struct ev_io w_watcher;
-    struct worker_buf_s* recvbuf;
+    struct worker_buf_s* current_recvbuf;
     struct worker_buf_s* sendbuf;
-    struct worker_buf_s* recvbufchain;
+    struct worker_buf_s* recvbuf;
     int fd;
     struct sockaddr addr;
     socklen_t addr_len;
@@ -38,7 +38,7 @@ struct worker_s {
     struct ev_io accept_watcher;
     int listen_fd;
     struct worker_buf_s* (*on_conn_recv_buf_alloc)(struct worker_conn_s* worker_conn);
-    void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbufchain);
+    void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbuf);
     void (*on_conn_recv_error)(struct worker_conn_s* worker_conn);
     void (*on_conn_send_error)(struct worker_conn_s* worker_conn);
     void (*on_conn_recv_close)(struct worker_conn_s* worker_conn);
@@ -59,7 +59,7 @@ int worker_accept(struct worker_conn_s* worker_conn);
 void worker_init(
         int listen_fd,
         struct worker_buf_s* (*on_conn_recv_buf_alloc)(struct worker_conn_s* worker_conn),
-        void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbufchain),
+        void (*on_conn_recv_success)(struct worker_conn_s* worker_conn, struct worker_buf_s* recvbuf),
         void (*on_conn_recv_error)(struct worker_conn_s* worker_conn),
         void (*on_conn_send_error)(struct worker_conn_s* worker_conn),
         void (*on_conn_recv_close)(struct worker_conn_s* worker_conn),
