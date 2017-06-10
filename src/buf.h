@@ -10,6 +10,7 @@
 #include "defs.h"
 
 struct worker_buf_s {
+    struct worker_buf_pool_s* buf_pool;
     struct worker_buf_s* next;
     size_t size;
     size_t idx;
@@ -30,7 +31,7 @@ struct worker_buf_pool_s* worker_buf_pool_init(char* const ptr, size_t ptrsize, 
 // 请不要有多个指针t同时指向同一个buf，否则可能会出现同一个buf被put多次的情况
 struct worker_buf_s* worker_buf_pool_get(struct worker_buf_pool_s* buf_pool);
 
-void worker_buf_pool_put(struct worker_buf_pool_s* buf_pool, struct worker_buf_s* buf);
+void worker_buf_pool_put(struct worker_buf_s* buf);
 
 
 #endif //WORKER_BUF_H

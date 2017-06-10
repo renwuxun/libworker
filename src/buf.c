@@ -30,8 +30,10 @@ struct worker_buf_pool_s* worker_buf_pool_init(char* const ptr, size_t ptrsize, 
     int i;
     for (i = 0; i < buf_pool->total-1; i++) {
         buf_pool->buf[i].next = &buf_pool->buf[i+1];
+        buf_pool->buf[i].buf_pool = buf_pool;
     }
     buf_pool->buf[buf_pool->total-1].next = NULL;
+    buf_pool->buf[i].buf_pool = buf_pool;
 
     return buf_pool;
 }
@@ -47,12 +49,12 @@ struct worker_buf_s* worker_buf_pool_get(struct worker_buf_pool_s* buf_pool) {
 
     return buf;
 }
-void worker_buf_pool_put(struct worker_buf_pool_s* buf_pool, struct worker_buf_s* buf) {
-    if (NULL == buf_pool->buf) {
-        buf_pool->buf = buf;
+void worker_buf_pool_put(struct worker_buf_s* buf) {
+    if (NULL == buf->buf_pool->buf) {
+        buf->buf_pool->buf = buf;
         return;
     }
-    buf->next = buf_pool->buf;
-    buf_pool->buf = buf;
-    buf_pool->frees++;
+    buf->next = buf->buf_pool->buf;
+    buf->buf_pool->buf = buf;
+    buf->buf_pool->frees++;
 }
