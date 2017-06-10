@@ -20,9 +20,9 @@ size_t worker_conn_pool_need_size(size_t count);
 
 struct worker_conn_pool_s* worker_conn_pool_init(char* const ptr, size_t ptrsize);
 
-inline static struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool_s* conn_pool);
+struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool_s* conn_pool);
 
-inline static void worker_conn_pool_put(struct worker_conn_pool_s* conn_pool, struct worker_conn_s* conn);
+void worker_conn_pool_put(struct worker_conn_pool_s* conn_pool, struct worker_conn_s* conn);
 
 
 #endif //WORKER_CONNPOOL_H

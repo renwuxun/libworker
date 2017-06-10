@@ -34,7 +34,7 @@ struct worker_conn_pool_s* worker_conn_pool_init(char* const ptr, size_t ptrsize
 
     return conn_pool;
 }
-inline static struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool_s* conn_pool) {
+struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool_s* conn_pool) {
     struct worker_conn_s* conn = conn_pool->conn;
     if (conn) {
         conn_pool->conn = conn->next;
@@ -43,7 +43,7 @@ inline static struct worker_conn_s* worker_conn_pool_get(struct worker_conn_pool
     }
     return conn;
 }
-inline static void worker_conn_pool_put(struct worker_conn_pool_s* conn_pool, struct worker_conn_s* conn) {
+void worker_conn_pool_put(struct worker_conn_pool_s* conn_pool, struct worker_conn_s* conn) {
     if (NULL == conn_pool->conn) {
         conn_pool->conn = conn;
         return;
