@@ -55,9 +55,13 @@ void worker_conn_close(struct worker_conn_s* worker_conn) {
 
 inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
     ssize_t n;
-    for (;worker_conn->recvbuf;) {
+    for (;;) {
         if (!worker_conn->recvbuf) {
             worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+        }
+        if (!worker_conn->recvbuf) {
+            worker_log_warning("no more buf for connection to recv");
+            return;
         }
         n = worker_recv(worker_conn->fd, worker_conn->recvbuf->data+worker_conn->recvbuf->idx, worker_conn->recvbuf->size-worker_conn->recvbuf->idx);
         switch (n) {
