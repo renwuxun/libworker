@@ -78,7 +78,7 @@ inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
             default:
                 worker_conn->recvbuf->idx += n;
                 worker.on_conn_recv_success(worker_conn, worker_conn->recvbuf);
-                if (0 < worker_conn->recvbuf->size) { // 接收区空了
+                if (0 < worker_conn->recvbuf->size-worker_conn->recvbuf->idx) { // 接收区空了
                     return;
                 }
                 /* curren recv buf is full*/
@@ -90,7 +90,7 @@ inline static void worker_conn_send(struct worker_conn_s* worker_conn) {
     struct worker_buf_s* a_send_buf;
     ssize_t n;
     for (;worker_conn->sendbuf;) {
-        n = worker_send(worker_conn->fd, worker_conn->sendbuf->data+worker_conn->sendbuf->idx, worker_conn->sendbuf->size);
+        n = worker_send(worker_conn->fd, worker_conn->sendbuf->data+worker_conn->sendbuf->idx, worker_conn->sendbuf->size-worker_conn->sendbuf->size);
         switch (n) {
             case -1:
                 if (EAGAIN != errno) {
@@ -99,9 +99,8 @@ inline static void worker_conn_send(struct worker_conn_s* worker_conn) {
                 }
                 return;
             default:
-                worker_conn->sendbuf->size -= n;
                 worker_conn->sendbuf->idx += n;
-                if (0 < worker_conn->sendbuf->size) { // 发送区满了
+                if (0 < worker_conn->sendbuf->size-worker_conn->sendbuf->idx) { // 发送区满了
                     return;
                 }
                 a_send_buf = worker_conn->sendbuf;
