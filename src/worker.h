@@ -22,13 +22,11 @@ struct worker_conn_s {
     struct worker_conn_s* next;
     struct ev_io r_watcher;
     struct ev_io w_watcher;
-    struct worker_buf_s* current_recvbuf;
-    struct worker_buf_s* sendbuf;
     struct worker_buf_s* recvbuf;
+    struct worker_buf_s* sendbuf;
     int fd;
     struct sockaddr addr;
     socklen_t addr_len;
-    void* data;
 };
 
 struct worker_s {

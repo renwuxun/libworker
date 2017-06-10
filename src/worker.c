@@ -54,21 +54,12 @@ void worker_conn_close(struct worker_conn_s* worker_conn) {
 }
 
 inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
-    struct worker_buf_s* buf;
     ssize_t n;
-    if (!worker_conn->current_recvbuf) {
-        worker_conn->current_recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
+    for (;worker_conn->recvbuf;) {
         if (!worker_conn->recvbuf) {
-            worker_conn->recvbuf = worker_conn->current_recvbuf;
-        } else {
-            buf = worker_conn->recvbuf;
-            for(;buf->next;buf=buf->next){}
-            buf->next = worker_conn->recvbuf;
+            worker_conn->recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
         }
-
-    }
-    for (;worker_conn->current_recvbuf;) {
-        n = worker_recv(worker_conn->fd, worker_conn->current_recvbuf->data+worker_conn->current_recvbuf->idx, worker_conn->current_recvbuf->size);
+        n = worker_recv(worker_conn->fd, worker_conn->recvbuf->data+worker_conn->recvbuf->idx, worker_conn->recvbuf->size-worker_conn->recvbuf->idx);
         switch (n) {
             case 0:
                 worker.on_conn_recv_close(worker_conn);
@@ -81,17 +72,12 @@ inline static void worker_conn_recv(struct worker_conn_s* worker_conn) {
                 }
                 return;
             default:
-                worker_conn->current_recvbuf->size -= n;
-                worker_conn->current_recvbuf->idx += n;
+                worker_conn->recvbuf->idx += n;
                 worker.on_conn_recv_success(worker_conn, worker_conn->recvbuf);
-                if (0 < worker_conn->current_recvbuf->size) { // 接收区空了
+                if (0 < worker_conn->recvbuf->size) { // 接收区空了
                     return;
                 }
                 /* curren recv buf is full*/
-                worker_conn->current_recvbuf = worker.on_conn_recv_buf_alloc(worker_conn);
-                buf = worker_conn->recvbuf;
-                for (;buf->next;buf=buf->next) {}
-                buf->next = worker_conn->current_recvbuf;
         }
     }
 }
