@@ -45,6 +45,8 @@ struct worker_buf_s* worker_buf_pool_get(struct worker_buf_pool_s* buf_pool) {
         buf_pool->frees--;
         buf->idx = 0;
         buf->size = buf_pool->size;
+    } else {
+        worker_log_warning("no more buf in pool [total:%d, bufsize:%d]", (int)buf_pool->total, (int)buf_pool->size);
     }
 
     return buf;

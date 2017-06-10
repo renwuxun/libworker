@@ -90,7 +90,7 @@ inline static void worker_conn_send(struct worker_conn_s* worker_conn) {
     struct worker_buf_s* a_send_buf;
     ssize_t n;
     for (;worker_conn->sendbuf;) {
-        n = worker_send(worker_conn->fd, worker_conn->sendbuf->data+worker_conn->sendbuf->idx, worker_conn->sendbuf->size-worker_conn->sendbuf->size);
+        n = worker_send(worker_conn->fd, worker_conn->sendbuf->data+worker_conn->sendbuf->idx, worker_conn->sendbuf->size-worker_conn->sendbuf->idx);
         switch (n) {
             case -1:
                 if (EAGAIN != errno) {
